@@ -1,35 +1,45 @@
 // src/middleware.js
 const rateLimiter = require("./RateLimiter");
 
-/**
- * Express middleware that rate limits requests by IP address.
- *
- * Usage: app.use(rateLimitMiddleware)
- */
-function rateLimitMiddleware(req, res, next) {
-  // Use the client's IP as their unique identifier
-  // req.ip gives the IP address in Express
-  const clientKey = req.ip;
+// Routes that skip rate limiting entirely
+const SKIP_ROUTES = ["/health", "/api/admin/stats"];
 
-  const { allowed, status } = rateLimiter.check(clientKey);
+async function rateLimitMiddleware(req, res, next) {
+  // Skip rate limiting for whitelisted routes
+  if (SKIP_ROUTES.includes(req.path)) return next();
 
-  // Always send back helpful headers so clients know their limit status
-  res.setHeader("X-RateLimit-Limit", status.capacity);
-  res.setHeader("X-RateLimit-Remaining", status.tokens);
-  res.setHeader("X-RateLimit-RefillRate", `${status.refillRate} tokens/sec`);
+  try {
+    const result = await rateLimiter.check(req);
 
-  if (!allowed) {
-    // 429 = "Too Many Requests" — the standard HTTP code for rate limiting
-    return res.status(429).json({
-      success: false,
-      error: "Too Many Requests",
-      message: "You have exceeded the rate limit. Please wait and try again.",
-      retryAfter: `${Math.ceil(1 / status.refillRate)} seconds`,
-    });
+    // Set standard rate limit headers
+    res.setHeader("X-RateLimit-Tier", result.tier);
+    res.setHeader(
+      "X-RateLimit-Limit",
+      result.tierConfig.capacity || result.tierConfig.maxRequests
+    );
+    res.setHeader("X-RateLimit-Remaining", result.remaining);
+
+    if (!result.allowed) {
+      res.setHeader(
+        "Retry-After",
+        Math.ceil((result.retryAfterMs || 1000) / 1000)
+      );
+      return res.status(429).json({
+        success: false,
+        error: "Too Many Requests",
+        message: `Rate limit exceeded for '${result.tier}' tier.`,
+        retryAfterMs: result.retryAfterMs,
+        tier: result.tier,
+      });
+    }
+
+    next();
+  } catch (err) {
+    // If rate limiter itself fails, fail open (let request through)
+    // In production you might want to fail closed instead
+    console.error("Rate limiter error:", err.message);
+    next();
   }
-
-  // Request is allowed — pass control to the next handler
-  next();
 }
 
 module.exports = rateLimitMiddleware;

@@ -3,68 +3,65 @@ const express = require("express");
 const rateLimitMiddleware = require("./src/middleware");
 const rateLimiter = require("./src/RateLimiter");
 const config = require("./config");
+const logger = require("./src/logger");
 
 const app = express();
-app.use(express.json()); // Parse JSON request bodies
-
-// ─── Apply Rate Limiting to ALL routes ───────────────────────────────────────
+app.use(express.json());
 app.use(rateLimitMiddleware);
 
-// ─── Routes ──────────────────────────────────────────────────────────────────
-
-// Home route — just to test the server is running
+// ── Public routes ──────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
-    success: true,
-    message: "Welcome to the Token Bucket Rate Limiter API!",
+    message: "Token Bucket Rate Limiter API",
+    tip: "Pass 'x-user-role: premium' or 'x-user-role: admin' header to test tiers",
     endpoints: {
-      "GET /api/data": "A sample protected endpoint",
-      "GET /api/status": "Check your current rate limit status",
-      "GET /health": "Server health check (not rate limited)",
+      "GET /api/data": "Protected endpoint",
+      "GET /api/status": "Your current rate limit status",
+      "GET /api/admin/stats": "Live server stats (not rate limited)",
+      "GET /health": "Health check",
     },
   });
 });
 
-// A sample API endpoint — protected by the rate limiter
 app.get("/api/data", (req, res) => {
   res.json({
     success: true,
-    message: "Here is your data!",
     data: { value: Math.random() * 100 },
     timestamp: new Date().toISOString(),
   });
 });
 
-// Check your current token bucket status
-app.get("/api/status", (req, res) => {
-  const clientKey = req.ip;
-  // Peek at status without consuming a token
-  const { status } = rateLimiter.check(clientKey, 0); // 0 tokens = just check
+app.get("/api/status", async (req, res) => {
+  const result = await rateLimiter.check(req);
+  res.json({ success: true, rateLimit: result });
+});
+
+// ── Admin / ops routes (not rate limited) ─────────────────
+app.get("/api/admin/stats", (req, res) => {
+  const stats = rateLimiter.getStoreStats();
   res.json({
     success: true,
-    clientIp: clientKey,
-    rateLimit: status,
+    store: stats,
+    tiers: Object.keys(config.TIERS).map((name) => ({
+      name,
+      ...config.TIERS[name],
+    })),
+    uptime: process.uptime(),
   });
 });
 
-// Health check — NOT rate limited (we remove it from middleware scope by ordering)
-// Note: Because we applied middleware globally above, let's use a workaround:
-// We'll manually skip rate limiting for /health in the middleware (see upgrade below)
 app.get("/health", (req, res) => {
-  res.json({ success: true, status: "Server is running!" });
+  res.json({ success: true, status: "ok", uptime: process.uptime() });
 });
 
-// ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ success: false, error: "Route not found" });
 });
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
 app.listen(config.PORT, () => {
-  console.log(`
-  ✅ Token Bucket Rate Limiter running!
-  📡 Server: http://localhost:${config.PORT}
-  🪣 Bucket capacity: ${config.BUCKET_CAPACITY} tokens
-  ♻️  Refill rate: ${config.REFILL_RATE} tokens/second
-  `);
+  logger.info(`Server started`, {
+    port: config.PORT,
+    store: config.STORE_TYPE,
+    tiers: Object.keys(config.TIERS),
+  });
 });
